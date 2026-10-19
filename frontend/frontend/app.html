@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lecture App</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  body{font-family:sans-serif;max-width:600px;margin:auto;padding:16px}
+  input,button{padding:10px;margin:4px 0;width:100%;font-size:16px}
+  .card{border:1px solid #ccc;border-radius:8px;padding:10px;margin:8px 0}
+  .hide{display:none}
+</style>
+</head>
+<body>
+<h2>🎓 Lecture App</h2>
+
+<div id="auth">
+  <input id="email" type="email" placeholder="Email">
+  <input id="password" type="password" placeholder="Password (6+ chars)">
+  <button onclick="signUp()">Sign up</button>
+  <button onclick="logIn()">Log in</button>
+</div>
+
+<div id="app" class="hide">
+  <button onclick="logOut()">Log out</button>
+  <input id="title" placeholder="Lecture title">
+  <button id="recBtn" onclick="toggleRec()">🎙 Start recording</button>
+  <p id="status"></p>
+  <h3>My lectures</h3>
+  <div id="list"></div>
+</div>
+
+<script>
+const SUPABASE_URL = "https://tdveyswoxviegxrsfacl.supabase.co";
+const SUPABASE_KEY ="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRkdmV5c3dveHZpZWd4cnNmYWNsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI0MjI4OTAsImV4cCI6MjEwNzk5ODg5MH0.-Jbv44Q1A2yAWfCBko2soDkM6h4wBAzuo6eF31ABdZ8";
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+let recorder, chunks = [], user = null;
+const $ = id => document.getElementById(id);
+
+async function signUp(){
+  const {error} = await sb.auth.signUp({email:$("email").value, password:$("password").value});
+  if(error) return alert(error.message);
+  alert("Signed up! Now tap Log in.");
+}
+async function logIn(){
+  const {error} = await sb.auth.signInWithPassword({email:$("email").value, password:$("password").value});
+  if(error) return alert(error.message);
+  init();
+}
+async function logOut(){ await sb.auth.signOut(); location.reload(); }
+
+async function init(){
+  const {data} = await sb.auth.getUser();
+  if(!data.user) return;
+  user = data.user;
+  $("auth").classList.add("hide");
+  $("app").classList.remove("hide");
+  loadList();
+}
+
+async function toggleRec(){
+  if(recorder && recorder.state === "recording"){
+    recorder.stop();
+    $("recBtn").textContent = "🎙 Start recording";
+    return;
+  }
+  const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+  recorder = new MediaRecorder(stream);
+  chunks = [];
+  recorder.ondataavailable = e => chunks.push(e.data);
+  recorder.onstop = upload;
+  recorder.start();
+  $("recBtn").textContent = "⏹ Stop recording";
+  $("status").textContent = "Recording...";
+}
+
+async function upload(){
+  $("status").textContent = "Uploading...";
+  const blob = new Blob(chunks, {type:"audio/webm"});
+  const path = `${user.id}/${Date.now()}.webm`;
+  const {error:upErr} = await sb.storage.from("lectures").upload(path, blob);
+  if(upErr) return $("status").textContent = "Upload error: " + upErr.message;
+  const {error} = await sb.from("lectures").insert({
+    user_id:user.id, title:$("title").value || "Untitled lecture",
+    audio_path:path, status:"uploaded"
+  });
+  $("status").textContent = error ? "DB error: " + error.message : "Saved ✅";
+  loadList();
+}
+
+async function loadList(){
+  const {data} = await sb.from("lectures").select("*").order("created_at",{ascending:false});
+  $("list").innerHTML = (data||[]).map(l => `
+    <div class="card">
+      <b>${l.title}</b><br>
+      <small>${new Date(l.created_at).toLocaleString()} · ${l.status}</small>
+      <p><b>Transcript:</b> ${l.transcript || "(coming soon)"}</p>
+      <p><b>Summary:</b> ${l.summary || "(coming soon)"}</p>
+    </div>`).join("");
+}
+init();
+</script>
+</body>
+</html>
