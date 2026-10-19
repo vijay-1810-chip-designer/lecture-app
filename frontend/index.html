@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lecture Notes Recorder</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 560px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 1.3rem; }
+  input, select, button { font-size: 1rem; padding: 10px; width: 100%; box-sizing: border-box; margin: 6px 0; }
+  button { border: 0; border-radius: 8px; background: #2b6cb0; color: #fff; }
+  button.stop { background: #c53030; }
+  button:disabled { opacity: .5; }
+  #timer { font-size: 2rem; text-align: center; margin: 12px 0; }
+  #status { color: #555; min-height: 1.4em; }
+  li { margin: 8px 0; }
+</style>
+</head>
+<body>
+<h1>Lecture Notes Recorder</h1>
+
+<input id="title" placeholder="Lecture name (e.g. Physics - Thermodynamics)">
+<select id="lang">
+  <option value="">Auto-detect language</option>
+  <option value="en">English</option>
+  <option value="hi">Hindi</option>
+  <option value="ta">Tamil</option>
+  <option value="te">Telugu</option>
+  <option value="kn">Kannada</option>
+  <option value="ml">Malayalam</option>
+</select>
+<label><input type="checkbox" id="summ" checked style="width:auto"> Add a summary to the PDF</label>
+
+<div id="timer">00:00:00</div>
+<button id="start">Start recording</button>
+<button id="stop" class="stop" disabled>Stop &amp; create PDF</button>
+<div id="status"></div>
+
+<h2 style="font-size:1.1rem">Saved notes</h2>
+<ul id="files"></ul>
+
+<script>
+const SEGMENT_MS = 5 * 60 * 1000;
+let stream, recorder, sessionId, index = 0, segTimer, tick, startTime, wakeLock;
+let pending = 0, stopping = false;
+const $ = id => document.getElementById(id);
+const status = t => $("status").textContent = t;
+
+function pickMime() {
+  for (const m of ["audio/webm;codecs=opus", "audio/mp4", "audio/webm"])
+    if (MediaRecorder.isTypeSupported(m)) return m;
+  return "";
+}
+
+async function upload(blob, i, mime) {
+  const ext = mime.includes("mp4") ? "m4a" : "webm";
+  const fd = new FormData();
+  fd.append("session_id", sessionId);
+  fd.append("index", i);
+  fd.append("language", $("lang").value);
+  fd.append("audio", blob, `part${i}.${ext}`);
+  pending++;
+  try {
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try {
+        const r = await fetch("/api/chunk", { method: "POST", body: fd });
+        if (r.ok) return;
+      } catch (e) {}
+      await new Promise(r => setTimeout(r, 2000 * attempt));
+    }
+    status("Warning: part " + i + " failed to upload.");
+  } finally { pending--; }
+}
+
+function startSegment() {
+  const mime = pickMime();
+  recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : {});
+  const chunks = [], i = index++;
+  recorder.ondataavailable = e => e.data.size && chunks.push(e.data);
+  recorder.onstop = () => {
+    upload(new Blob(chunks, { type: recorder.mimeType }), i, recorder.mimeType);
+    if (!stopping) startSegment();
+  };
+  recorder.start();
+  segTimer = setTimeout(() => recorder.state === "recording" && recorder.stop(), SEGMENT_MS);
+}
+
+$("start").onclick = async () => {
+  if (!$("title").value.trim()) return status("Please enter a lecture name first.");
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) { return status("Microphone permission denied."); }
+  sessionId = "s" + Date.now();
+  index = 0; stopping = false;
+  try { wakeLock = await navigator.wakeLock.request("screen"); } catch (e) {}
+  startSegment();
+  startTime = Date.now();
+  tick = setInterval(() => {
+    const s = Math.floor((Date.now() - startTime) / 1000);
+    $("timer").textContent = [s/3600, s%3600/60, s%60].map(v => String(Math.floor(v)).padStart(2, "0")).join(":");
+  }, 500);
+  $("start").disabled = true; $("stop").disabled = false;
+  status("Recording... keep this screen open.");
+};
+
+$("stop").onclick = async () => {
+  stopping = true;
+  clearTimeout(segTimer); clearInterval(tick);
+  recorder.stop();
+  stream.getTracks().forEach(t => t.stop());
+  try { wakeLock && wakeLock.release(); } catch (e) {}
+  $("stop").disabled = true;
+  status("Uploading and transcribing...");
+  while (pending > 0 || recorder.state !== "inactive") await new Promise(r => setTimeout(r, 500));
+  await new Promise(r => setTimeout(r, 800));
+  while (pending > 0) await new Promise(r => setTimeout(r, 500));
+  status("Creating PDF...");
+  const fd = new FormData();
+  fd.append("session_id", sessionId);
+  fd.append("title", $("title").value.trim());
+  fd.append("summarize", $("summ").checked);
+  const r = await fetch("/api/finish", { method: "POST", body: fd });
+  if (r.ok) { status("Done! Saved to cloud."); loadFiles(); }
+  else status("Error: " + (await r.text()));
+  $("start").disabled = false;
+};
+
+async function loadFiles() {
+  const list = await (await fetch("/api/files")).json();
+  $("files").innerHTML = "";
+  for (const f of list) {
+    const li = document.createElement("li");
+    li.innerHTML = `<a href="${f.url}" target="_blank">${f.name}</a> <button class="ren" style="width:auto;padding:4px 10px">Rename</button>`;
+    li.querySelector(".ren").onclick = async () => {
+      const n = prompt("New name:", f.name.replace(/\.pdf$/, ""));
+      if (!n) return;
+      const fd = new FormData();
+      fd.append("old_name", f.name); fd.append("new_title", n);
+      await fetch("/api/rename", { method: "POST", body: fd });
+      loadFiles();
+    };
+    $("files").appendChild(li);
+  }
+}
+loadFiles();
+</script>
+</body>
+</html>
